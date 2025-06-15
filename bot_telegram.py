@@ -7,7 +7,24 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from dotenv import load_dotenv
+
 import os
+import socket
+from threading import Thread
+
+def run_dummy_server():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('0.0.0.0', 8000))
+        s.listen()
+        while True:
+            conn, addr = s.accept()
+            conn.sendall(b'HTTP/1.1 200 OK\n\nBot is running')
+            conn.close()
+
+# Запуск в отдельном потоке
+Thread(target=run_dummy_server, daemon=True).start()
+
+
 
 load_dotenv()
 KEY_TG = os.getenv('KEY_TG')
