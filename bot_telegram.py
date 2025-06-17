@@ -9,22 +9,7 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from dotenv import load_dotenv
 
 import os
-import socket
-from threading import Thread
-
-def run_dummy_server():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('0.0.0.0', 8000))
-        s.listen()
-        while True:
-            conn, addr = s.accept()
-            conn.sendall(b'HTTP/1.1 200 OK\n\nBot is running')
-            conn.close()
-
-# Запуск в отдельном потоке
-Thread(target=run_dummy_server, daemon=True).start()
-
-
+from aiohttp import web
 
 load_dotenv()
 KEY_TG = os.getenv('KEY_TG')
@@ -53,6 +38,18 @@ MONTHS_RU = {
     5: 'мая', 6: 'июня', 7: 'июля', 8: 'августа',
     9: 'сентября', 10: 'октября', 11: 'ноября', 12: 'декабря'
 }
+
+async def handle_health_check(request):
+    return web.Response(text="Bot is running")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    await site.start()
+    logger.info("Web server started on port 8000")
 
 # Создание клавиатуры с именами
 def get_names_keyboard():
@@ -198,19 +195,15 @@ async def set_bot_commands():
     ]
     await bot.set_my_commands(commands)
 
+async def on_startup():
+    await set_bot_commands()
+    asyncio.create_task(send_duty_reminders())
+    asyncio.create_task(run_web_server())
+
 # Основная функция
 async def main():
-    # Настройка команд бота
-    await set_bot_commands()
-    
-    # Запуск задачи отправки напоминаний
-    asyncio.create_task(send_duty_reminders())
-    
-    # Запуск polling
+    dp.startup.register(on_startup)
     await dp.start_polling(bot)
 
-if platform.system() == "Emscripten":
-    asyncio.ensure_future(main())
-else:
-    if __name__ == "__main__":
-        asyncio.run(main())
+if __name__ == "__main__":
+    asyncio.run(main())
