@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timedelta
 import logging
+import platform
 import signal
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -43,9 +44,9 @@ async def run_web_server():
     app.router.add_get('/', handle_health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    site = web.TCPSite(runner, '0.0.0.0', 10000)  # Изменили порт
     await site.start()
-    logger.info("Web server started on port 8000")
+    logger.info("Web server started on port 10000")
     return runner
 
 async def on_shutdown():
@@ -190,26 +191,47 @@ async def on_startup():
     await run_web_server()
 
 async def main():
-    loop = asyncio.get_event_loop()
-    
-    # Обработка сигналов для graceful shutdown
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(
-            sig,
-            lambda s=sig: asyncio.create_task(graceful_shutdown(s, loop))
-        )
-    
     dp.startup.register(on_startup)
     
     try:
+        # Создаем и запускаем задачи
+        runner = await run_web_server()
+        reminder_task = asyncio.create_task(send_duty_reminders())
+        
+        # Запускаем бота
         await dp.start_polling(bot)
+        
     except asyncio.CancelledError:
-        pass
+        logger.info("Received cancellation signal")
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
     finally:
+        # Корректное завершение
+        logger.info("Starting shutdown...")
+        reminder_task.cancel()
+        try:
+            await reminder_task
+        except asyncio.CancelledError:
+            pass
         await on_shutdown()
+        logger.info("Shutdown complete")
 
 if __name__ == "__main__":
-    try:
+    if platform.system() == "Windows":
+        # Для Windows используем простой запуск без обработки сигналов
         asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+    else:
+        # Для Unix-систем используем обработку сигналов
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig,lambda s=sig: asyncio.create_task(graceful_shutdown(s, loop)))
+            
+            loop.run_until_complete(main())
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt")
+        finally:
+            loop.close()
