@@ -1,13 +1,12 @@
 import asyncio
 from datetime import datetime, timedelta
 import logging
-import platform
+import signal
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from dotenv import load_dotenv
-
 import os
 from aiohttp import web
 
@@ -15,24 +14,21 @@ load_dotenv()
 KEY_TG = os.getenv('KEY_TG')
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Инициализация бота
 bot = Bot(token=KEY_TG)
-dp = Dispatcher(read_timeout=30, write_timeout=30)  # Увеличенные таймауты
+dp = Dispatcher()
 
-# Словарь для хранения данных пользователей
+# Данные приложения
 user_data = {}
-
-# Словарь для хранения подтверждений дежурства (user_id -> дата подтверждения)
 confirmed_duties = {}
-
-# Список имен и начальная дата ротации
 NAMES = ['Аня', 'Ларик', 'Маша']
-START_DATE = datetime(2025, 6, 14)  # Начальная дата для ротации
-
-# Словарь для русских названий месяцев
+START_DATE = datetime(2025, 6, 14)
 MONTHS_RU = {
     1: 'января', 2: 'февраля', 3: 'марта', 4: 'апреля',
     5: 'мая', 6: 'июня', 7: 'июля', 8: 'августа',
@@ -50,47 +46,54 @@ async def run_web_server():
     site = web.TCPSite(runner, '0.0.0.0', 8000)
     await site.start()
     logger.info("Web server started on port 8000")
+    return runner
 
-# Создание клавиатуры с именами
+async def on_shutdown():
+    logger.info("Shutting down...")
+    await bot.session.close()
+
+async def graceful_shutdown(signal, loop):
+    """Обработка graceful shutdown"""
+    logger.info(f"Received exit signal {signal.name}...")
+    await on_shutdown()
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    [task.cancel() for task in tasks]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    loop.stop()
+
 def get_names_keyboard():
     builder = ReplyKeyboardBuilder()
     for name in NAMES:
         builder.add(KeyboardButton(text=name))
     return builder.as_markup(resize_keyboard=True)
 
-# Создание инлайн-кнопки "Иду дежурить"
 def get_duty_confirmation_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Иду дежурить! ✅", callback_data="confirm_duty")]
     ])
-    return keyboard
 
-# Форматирование даты в виде "14 июня"
 def format_date_ru(date):
     day = date.day
     month = MONTHS_RU[date.month]
     return f"{day} {month}".lstrip('0').replace(' 0', ' ')
 
-# Расчет текущего дежурного и даты следующего дежурства
 def get_duty_info(selected_name):
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     days_since_start = (today - START_DATE).days
-    cycle_day = days_since_start % 9  # Цикл из 9 дней (3 человека × (1 день дежурства + 2 дня отдыха))
+    cycle_day = days_since_start % 9
     
-    # Определяем текущего дежурного
     if cycle_day == 0:
-        current_duty_name = NAMES[0]  # Аня
+        current_duty_name = NAMES[0]
     elif cycle_day == 3:
-        current_duty_name = NAMES[1]  # Ларик
+        current_duty_name = NAMES[1]
     elif cycle_day == 6:
-        current_duty_name = NAMES[2]  # Маша
+        current_duty_name = NAMES[2]
     else:
-        current_duty_name = None  # Никто не дежурит
+        current_duty_name = None
     
-    # Найти следующую дату дежурства для выбранного имени
     selected_index = NAMES.index(selected_name)
     days_until_duty = None
-    for i in range(9):  # Проверяем следующие 9 дней
+    for i in range(9):
         check_day = (days_since_start + i) % 9
         if (selected_index == 0 and check_day == 0) or \
            (selected_index == 1 and check_day == 3) or \
@@ -103,7 +106,6 @@ def get_duty_info(selected_name):
     
     return current_duty_name, next_duty_date
 
-# Обработчик команды /start
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     welcome_message = (
@@ -114,16 +116,13 @@ async def start_command(message: types.Message):
     await message.answer(welcome_message)
     await message.answer("Выбери своё имя:", reply_markup=get_names_keyboard())
 
-# Обработчик выбора имени
 @dp.message(lambda message: message.text in NAMES)
 async def handle_name_selection(message: types.Message):
     user_id = message.from_user.id
     selected_name = message.text
-    user_data[user_id] = selected_name  # Сохраняем выбор для автоматических уведомлений
+    user_data[user_id] = selected_name
     
     _, next_duty_date = get_duty_info(selected_name)
-    
-    # Форматирование даты
     formatted_date = format_date_ru(next_duty_date)
     
     await message.answer(
@@ -133,13 +132,10 @@ async def handle_name_selection(message: types.Message):
         reply_markup=types.ReplyKeyboardRemove()
     )
 
-# Обработчик нажатия кнопки "Иду дежурить"
 @dp.callback_query(lambda c: c.data == "confirm_duty")
 async def confirm_duty(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Сохраняем подтверждение дежурства
     confirmed_duties[user_id] = today
     
     await callback.message.edit_text(
@@ -148,62 +144,72 @@ async def confirm_duty(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-# Функция для отправки напоминаний
 async def send_duty_reminders():
     while True:
-        now = datetime.now()
-        if now.minute == 0 and now.hour in [12, 18, 21]:  # Отправка в 12:00, 18:00, 21:00
-            today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            days_since_start = (today - START_DATE).days
-            cycle_day = days_since_start % 9  # Цикл из 9 дней
-            
-            # Проверяем, есть ли дежурный сегодня
-            if cycle_day in [0, 3, 6]:
-                current_index = cycle_day // 3  # 0 -> 0 (Аня), 3 -> 1 (Ларик), 6 -> 2 (Маша)
-                current_duty_name = NAMES[current_index]
+        try:
+            now = datetime.now()
+            if now.minute == 0 and now.hour in [12, 18, 21]:
+                today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                days_since_start = (today - START_DATE).days
+                cycle_day = days_since_start % 9
                 
-                # Логирование для отладки
-                logger.info(f"Сегодня ({format_date_ru(today)}) дежурит: {current_duty_name}")
-                
-                # Форматирование даты
-                formatted_date = format_date_ru(today)
-                
-                # Отправка напоминания всем пользователям, выбравшим текущее имя
-                for user_id, name in user_data.items():
-                    if name == current_duty_name:
-                        # Проверяем, не подтвердил ли пользователь дежурство сегодня
-                        if confirmed_duties.get(user_id) != today:
+                if cycle_day in [0, 3, 6]:
+                    current_index = cycle_day // 3
+                    current_duty_name = NAMES[current_index]
+                    logger.info(f"Сегодня ({format_date_ru(today)}) дежурит: {current_duty_name}")
+                    
+                    formatted_date = format_date_ru(today)
+                    for user_id, name in user_data.items():
+                        if name == current_duty_name and confirmed_duties.get(user_id) != today:
                             try:
                                 await bot.send_message(
                                     user_id,
                                     f"Напоминание: {name}, сегодня ({formatted_date}) ты дежуришь в ванной! 🛁",
                                     reply_markup=get_duty_confirmation_keyboard()
                                 )
-                                logger.info(f"Отправлено напоминание пользователю {user_id} ({name})")
                             except Exception as e:
-                                logger.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
-            else:
-                logger.info(f"Сегодня ({format_date_ru(today)}) никто не дежурит")
-        
-        # Проверяем раз в минуту
-        await asyncio.sleep(60)
+                                logger.error(f"Ошибка отправки сообщения: {e}")
+                else:
+                    logger.info(f"Сегодня ({format_date_ru(today)}) никто не дежурит")
+            
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            logger.info("Reminder task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in reminder task: {e}")
+            await asyncio.sleep(60)
 
-# Функция для настройки команд бота
 async def set_bot_commands():
-    commands = [
-        BotCommand(command="/start", description="Начать и выбрать имя")
-    ]
+    commands = [BotCommand(command="/start", description="Начать и выбрать имя")]
     await bot.set_my_commands(commands)
 
 async def on_startup():
     await set_bot_commands()
     asyncio.create_task(send_duty_reminders())
-    asyncio.create_task(run_web_server())
+    await run_web_server()
 
-# Основная функция
 async def main():
+    loop = asyncio.get_event_loop()
+    
+    # Обработка сигналов для graceful shutdown
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(
+            sig,
+            lambda s=sig: asyncio.create_task(graceful_shutdown(s, loop))
+        )
+    
     dp.startup.register(on_startup)
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await on_shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
